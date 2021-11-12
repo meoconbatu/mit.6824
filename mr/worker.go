@@ -8,7 +8,10 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 )
 
 // KeyValue struct
@@ -34,16 +37,25 @@ func ihash(key string) int {
 //
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	id := 1
-	reply := RequestTask(id)
-	switch reply.TaskType {
-	case MAP:
-		content, _ := readInputFile(reply.FileName)
-		kvaSet := mapf(reply.FileName, content)
-		writeToIntermediateFile(1, reply.NReduce, kvaSet)
-		Notify(id, COMPLETED)
-		id++
-	case EXIT:
-		return
+	for {
+		reply := RequestTask(id)
+		switch reply.TaskType {
+		case MAP:
+			content, _ := readInputFile(reply.FileName)
+			kvaSet := mapf(reply.FileName, content)
+			writeToIntermediateFile(id, reply.NReduce, kvaSet)
+			Notify(id, COMPLETED)
+			id++
+		case REDUCE:
+			intermediate, _ := readIntermediateFile(reply.FileName)
+			writeToOutputFile(reply.FileName, intermediate, reducef)
+			Notify(id, COMPLETED)
+			id++
+		case WAITING:
+			time.Sleep(time.Second)
+		case EXIT:
+			return
+		}
 	}
 }
 func readInputFile(fileName string) (string, error) {
@@ -57,6 +69,32 @@ func readInputFile(fileName string) (string, error) {
 		return "", err
 	}
 	return string(content), nil
+}
+
+func readIntermediateFile(fileName string) ([]KeyValue, error) {
+	matches, err := filepath.Glob(fileName)
+	if err != nil {
+		return nil, err
+	}
+	kva := make([]KeyValue, 0)
+	for _, fileName := range matches {
+		file, err := os.Open(fileName)
+		if err != nil {
+			return nil, err
+		}
+		scanner := bufio.NewScanner(file)
+
+		var k, v string
+		for scanner.Scan() {
+			_, err = fmt.Sscanf(scanner.Text(), "%s %s", &k, &v)
+			if err != nil {
+				return nil, err
+			}
+			kva = append(kva, KeyValue{k, v})
+		}
+		file.Close()
+	}
+	return kva, nil
 }
 
 // ByKey type for sorting by key.
@@ -90,6 +128,32 @@ func writeToIntermediateFile(x, nReduce int, kvaSet []KeyValue) {
 		w.Flush()
 		ofile.Close()
 		os.Rename(ofile.Name(), oname)
+	}
+}
+
+// output files is mr-out-Y, and Y is the reduce task number
+func writeToOutputFile(fileName string, intermediate []KeyValue, reducef func(string, []string) string) {
+	sort.Sort(ByKey(intermediate))
+
+	oname := strings.Replace(fileName, "*", "out", -1)
+	ofile, _ := os.Create(oname)
+	defer ofile.Close()
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
 	}
 }
 

@@ -34,7 +34,7 @@ type RequestTaskArgs struct {
 
 // RequestTaskReply type
 type RequestTaskReply struct {
-	TaskType taskType // MAP, REDUCE
+	TaskType taskType // MAP, REDUCE, WAITING, EXIT
 	FileName string
 	NReduce  int
 }

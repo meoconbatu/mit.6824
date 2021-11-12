@@ -2,6 +2,7 @@ package mr
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -30,6 +31,8 @@ const (
 	REDUCE = "REDUCE"
 	// EXIT is a task type
 	EXIT = "EXIT"
+	// WAITING is a task type
+	WAITING = "WAITING"
 )
 
 // Task is a struct that contains information of a task.
@@ -45,7 +48,8 @@ type Coordinator struct {
 	mapTasks    []Task
 	reduceTasks []Task
 	NReduce     int
-	mu          sync.Mutex
+	muMap       sync.Mutex
+	muReduce    sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -62,17 +66,47 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 // RequestTask func
 func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply) error {
+	allMapTaskDone := true
+	c.muMap.Lock()
 	for i, task := range c.mapTasks {
 		if task.Status == IDLE {
 			reply.FileName = task.FileName
 			reply.TaskType = MAP
 			reply.NReduce = c.NReduce
-			c.mu.Lock()
 			c.mapTasks[i].WorkerID = &args.WorkerID
 			c.mapTasks[i].Status = INPROGRESS
-			c.mu.Unlock()
+			c.muMap.Unlock()
 			return nil
+		} else if task.Status == INPROGRESS {
+			allMapTaskDone = false
 		}
+	}
+	c.muMap.Unlock()
+	if !allMapTaskDone {
+		reply.TaskType = WAITING
+		return nil
+	}
+
+	allReduceTaskDone := true
+	c.muReduce.Lock()
+
+	for i, task := range c.reduceTasks {
+		if task.Status == IDLE {
+			reply.FileName = task.FileName
+			reply.TaskType = REDUCE
+			reply.NReduce = c.NReduce
+			c.reduceTasks[i].WorkerID = &args.WorkerID
+			c.reduceTasks[i].Status = INPROGRESS
+			c.muReduce.Unlock()
+			return nil
+		} else if task.Status == INPROGRESS {
+			allReduceTaskDone = false
+		}
+	}
+	c.muReduce.Unlock()
+	if !allReduceTaskDone {
+		reply.TaskType = WAITING
+		return nil
 	}
 	reply.TaskType = EXIT
 	return nil
@@ -81,10 +115,19 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 // Notify func
 func (c *Coordinator) Notify(args *RequestTaskArgs, reply *RequestTaskReply) error {
 	for i, task := range c.mapTasks {
-		if *task.WorkerID == args.WorkerID {
-			c.mu.Lock()
+		if *task.WorkerID == args.WorkerID && task.Status == INPROGRESS {
+			c.muMap.Lock()
 			c.mapTasks[i].Status = args.Status
-			c.mu.Unlock()
+			c.muMap.Unlock()
+			return nil
+		}
+	}
+
+	for i, task := range c.reduceTasks {
+		if *task.WorkerID == args.WorkerID && task.Status == INPROGRESS {
+			c.muReduce.Lock()
+			c.reduceTasks[i].Status = args.Status
+			c.muReduce.Unlock()
 			return nil
 		}
 	}
@@ -112,14 +155,14 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	c.mu.Lock()
-	for _, task := range c.mapTasks {
+	c.muReduce.Lock()
+	for _, task := range c.reduceTasks {
 		if task.Status != COMPLETED {
-			c.mu.Unlock()
+			c.muReduce.Unlock()
 			return false
 		}
 	}
-	c.mu.Unlock()
+	c.muReduce.Unlock()
 	return true
 }
 
@@ -129,18 +172,26 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	mapTasks := initMapTask(files)
-	c := Coordinator{mapTasks, nil, nReduce, sync.Mutex{}}
+	mapTasks := initMapTasks(files)
+	reduceTasks := initReduceTasks(nReduce)
+	c := Coordinator{mapTasks, reduceTasks, nReduce, sync.Mutex{}, sync.Mutex{}}
 
 	// Your code here.
-	initMapTask(files)
 	c.server()
 	return &c
 }
-func initMapTask(files []string) []Task {
+func initMapTasks(files []string) []Task {
 	tasks := make([]Task, len(files))
 	for i, file := range files {
 		tasks[i] = Task{IDLE, file, nil}
+	}
+	return tasks
+}
+
+func initReduceTasks(nReduce int) []Task {
+	tasks := make([]Task, nReduce)
+	for i := 0; i < nReduce; i++ {
+		tasks[i] = Task{IDLE, fmt.Sprintf("mr-*-%d", i), nil}
 	}
 	return tasks
 }
