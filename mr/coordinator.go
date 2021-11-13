@@ -9,8 +9,11 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
+// state of a task.
+// WAITING, RUNNING, DONE
 type state string
 
 const (
@@ -22,6 +25,8 @@ const (
 	COMPLETED = "COMPLETED"
 )
 
+// taskType
+// MAP, REDUCE, WAITING, EXIT
 type taskType string
 
 const (
@@ -37,9 +42,10 @@ const (
 
 // Task is a struct that contains information of a task.
 type Task struct {
-	Status   state
-	FileName string // the file that the WorkerID needs to read/write
-	WorkerID *int   // id of the worker that the task is assigned to
+	Status             state
+	FileName           string // the file that the WorkerID needs to read/write
+	WorkerID           *int   // id of the worker that the task is assigned to
+	StartTime, EndTime *time.Time
 }
 
 // Coordinator is a struct that contains the state of the coordinator.
@@ -75,6 +81,8 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.NReduce = c.NReduce
 			c.mapTasks[i].WorkerID = &args.WorkerID
 			c.mapTasks[i].Status = INPROGRESS
+			now := time.Now()
+			c.mapTasks[i].StartTime = &now
 			c.muMap.Unlock()
 			return nil
 		} else if task.Status == INPROGRESS {
@@ -97,6 +105,8 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 			reply.NReduce = c.NReduce
 			c.reduceTasks[i].WorkerID = &args.WorkerID
 			c.reduceTasks[i].Status = INPROGRESS
+			now := time.Now()
+			c.reduceTasks[i].StartTime = &now
 			c.muReduce.Unlock()
 			return nil
 		} else if task.Status == INPROGRESS {
@@ -114,23 +124,24 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 
 // Notify func
 func (c *Coordinator) Notify(args *RequestTaskArgs, reply *RequestTaskReply) error {
+	c.muMap.Lock()
 	for i, task := range c.mapTasks {
 		if *task.WorkerID == args.WorkerID && task.Status == INPROGRESS {
-			c.muMap.Lock()
 			c.mapTasks[i].Status = args.Status
 			c.muMap.Unlock()
 			return nil
 		}
 	}
-
+	c.muMap.Unlock()
+	c.muReduce.Lock()
 	for i, task := range c.reduceTasks {
 		if *task.WorkerID == args.WorkerID && task.Status == INPROGRESS {
-			c.muReduce.Lock()
 			c.reduceTasks[i].Status = args.Status
 			c.muReduce.Unlock()
 			return nil
 		}
 	}
+	c.muReduce.Unlock()
 	return errors.New("workerid not exists")
 }
 
@@ -166,6 +177,28 @@ func (c *Coordinator) Done() bool {
 	return true
 }
 
+// Backup After waiting for 10s, the coordinator give up and re-issue the task to a different worker.
+func (c *Coordinator) Backup() {
+	for !c.Done() {
+		c.muMap.Lock()
+		for i, task := range c.mapTasks {
+			if task.Status == INPROGRESS && task.StartTime.Add(time.Second*10).Before(time.Now()) {
+				c.mapTasks[i].Status = IDLE
+			}
+		}
+		c.muMap.Unlock()
+
+		c.muReduce.Lock()
+		for i, task := range c.reduceTasks {
+			if task.Status == INPROGRESS && task.StartTime.Add(time.Second*10).Before(time.Now()) {
+				c.reduceTasks[i].Status = IDLE
+			}
+		}
+		c.muReduce.Unlock()
+		time.Sleep(time.Second)
+	}
+}
+
 //
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
@@ -175,7 +208,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	mapTasks := initMapTasks(files)
 	reduceTasks := initReduceTasks(nReduce)
 	c := Coordinator{mapTasks, reduceTasks, nReduce, sync.Mutex{}, sync.Mutex{}}
-
+	go c.Backup()
 	// Your code here.
 	c.server()
 	return &c
@@ -183,7 +216,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 func initMapTasks(files []string) []Task {
 	tasks := make([]Task, len(files))
 	for i, file := range files {
-		tasks[i] = Task{IDLE, file, nil}
+		tasks[i] = Task{IDLE, file, nil, nil, nil}
 	}
 	return tasks
 }
@@ -191,7 +224,7 @@ func initMapTasks(files []string) []Task {
 func initReduceTasks(nReduce int) []Task {
 	tasks := make([]Task, nReduce)
 	for i := 0; i < nReduce; i++ {
-		tasks[i] = Task{IDLE, fmt.Sprintf("mr-*-%d", i), nil}
+		tasks[i] = Task{IDLE, fmt.Sprintf("mr-*-%d", i), nil, nil, nil}
 	}
 	return tasks
 }

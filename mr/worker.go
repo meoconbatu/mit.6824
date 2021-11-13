@@ -11,7 +11,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // KeyValue struct
@@ -36,26 +39,68 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	id := 1
-	for {
-		reply := RequestTask(id)
-		switch reply.TaskType {
-		case MAP:
-			content, _ := readInputFile(reply.FileName)
-			kvaSet := mapf(reply.FileName, content)
-			writeToIntermediateFile(id, reply.NReduce, kvaSet)
-			Notify(id, COMPLETED)
-			id++
-		case REDUCE:
-			intermediate, _ := readIntermediateFile(reply.FileName)
-			writeToOutputFile(reply.FileName, intermediate, reducef)
-			Notify(id, COMPLETED)
-			id++
-		case WAITING:
-			time.Sleep(time.Second)
-		case EXIT:
-			return
-		}
+	for processNoConcurrency(mapf, reducef) {
+
+	}
+	// exit := make(chan bool, 1)
+	// for {
+	// 	select {
+	// 	case <-exit:
+	// 		return
+	// 	default:
+	// 		go process(exit, mapf, reducef)
+	// 	}
+	// 	time.Sleep(time.Millisecond * 10)
+	// }
+}
+func processNoConcurrency(mapf func(string, string) []KeyValue, reducef func(string, []string) string) bool {
+	id := int(uuid.New().ID())
+	reply, ok := RequestTask(id)
+	if !ok {
+		return false
+	}
+	switch reply.TaskType {
+	case MAP:
+		content, _ := readInputFile(reply.FileName)
+		kvaSet := mapf(reply.FileName, content)
+		writeToIntermediateFile(id, reply.NReduce, kvaSet)
+		ok = Notify(id, COMPLETED)
+	case REDUCE:
+		intermediate, _ := readIntermediateFile(reply.FileName)
+		writeToOutputFile(reply.FileName, intermediate, reducef)
+		ok = Notify(id, COMPLETED)
+	case WAITING:
+		time.Sleep(time.Millisecond * 50)
+	case EXIT:
+		return false
+	}
+	return ok
+}
+func process(exit chan bool, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	id := int(uuid.New().ID())
+	reply, ok := RequestTask(id)
+	if !ok {
+		exit <- true
+		return
+	}
+	switch reply.TaskType {
+	case MAP:
+		content, _ := readInputFile(reply.FileName)
+		kvaSet := mapf(reply.FileName, content)
+		writeToIntermediateFile(id, reply.NReduce, kvaSet)
+		ok = Notify(id, COMPLETED)
+	case REDUCE:
+		intermediate, _ := readIntermediateFile(reply.FileName)
+		writeToOutputFile(reply.FileName, intermediate, reducef)
+		ok = Notify(id, COMPLETED)
+	case WAITING:
+		break
+	case EXIT:
+		exit <- true
+	}
+	if !ok {
+		exit <- true
+		return
 	}
 }
 func readInputFile(fileName string) (string, error) {
@@ -107,7 +152,6 @@ func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // intermediate files is mr-X-Y, where X is the Map task number, and Y is the reduce task number
 func writeToIntermediateFile(x, nReduce int, kvaSet []KeyValue) {
-	sort.Sort(ByKey(kvaSet))
 	hashMap := make(map[int][]KeyValue)
 	for _, kva := range kvaSet {
 		y := ihash(kva.Key) % nReduce
@@ -117,10 +161,8 @@ func writeToIntermediateFile(x, nReduce int, kvaSet []KeyValue) {
 	for y, kvaSet := range hashMap {
 		oname := fmt.Sprintf("mr-%d-%d", x, y)
 
-		ofile, _ := os.CreateTemp("", oname+"-*")
-
+		ofile, _ := ioutil.TempFile("", oname+"-*")
 		w := bufio.NewWriter(ofile)
-
 		sort.Sort(ByKey(kvaSet))
 		for _, kva := range kvaSet {
 			fmt.Fprintf(w, "%v %v\n", kva.Key, kva.Value)
@@ -137,7 +179,9 @@ func writeToOutputFile(fileName string, intermediate []KeyValue, reducef func(st
 
 	oname := strings.Replace(fileName, "*", "out", -1)
 	ofile, _ := os.Create(oname)
+	// log.Println(ofile.Name())
 	defer ofile.Close()
+	w := bufio.NewWriter(ofile)
 
 	i := 0
 	for i < len(intermediate) {
@@ -151,24 +195,25 @@ func writeToOutputFile(fileName string, intermediate []KeyValue, reducef func(st
 		}
 		output := reducef(intermediate[i].Key, values)
 
-		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		fmt.Fprintf(w, "%v %v\n", intermediate[i].Key, output)
 
 		i = j
 	}
+	w.Flush()
 }
 
 // RequestTask func
-func RequestTask(workerID int) RequestTaskReply {
+func RequestTask(workerID int) (RequestTaskReply, bool) {
 	args := RequestTaskArgs{workerID, IDLE}
 	reply := RequestTaskReply{}
-	call("Coordinator.RequestTask", &args, &reply)
-	return reply
+	ok := call("Coordinator.RequestTask", &args, &reply)
+	return reply, ok
 }
 
 // Notify func
-func Notify(workerID int, status state) {
+func Notify(workerID int, status state) bool {
 	args := RequestTaskArgs{workerID, status}
-	call("Coordinator.Notify", &args, nil)
+	return call("Coordinator.Notify", &args, nil)
 }
 
 // CallExample func
@@ -212,7 +257,8 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err == nil {
 		return true
 	}
-
+	var wg sync.WaitGroup
+	wg.Wait()
 	fmt.Println(err)
 	return false
 }

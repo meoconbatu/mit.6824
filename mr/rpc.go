@@ -29,12 +29,12 @@ type ExampleReply struct {
 // RequestTaskArgs type
 type RequestTaskArgs struct {
 	WorkerID int
-	Status   state // WAITING, RUNNING, DONE
+	Status   state
 }
 
 // RequestTaskReply type
 type RequestTaskReply struct {
-	TaskType taskType // MAP, REDUCE, WAITING, EXIT
+	TaskType taskType
 	FileName string
 	NReduce  int
 }
