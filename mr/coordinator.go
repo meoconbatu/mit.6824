@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// WaitingTime is the time (second) the coordinator wait for the workers to done their tasks.
+const WaitingTime = 10
+
 // state of a task.
 // WAITING, RUNNING, DONE
 type state string
@@ -48,26 +51,18 @@ type Task struct {
 	StartTime, EndTime *time.Time
 }
 
+// IsRunningTooSlowly checks if the task is running too slowly.
+func (task Task) IsRunningTooSlowly() bool {
+	return task.Status == INPROGRESS && task.StartTime.Add(time.Second*WaitingTime).Before(time.Now())
+}
+
 // Coordinator is a struct that contains the state of the coordinator.
 type Coordinator struct {
-	// Your definitions here.
 	mapTasks    []Task
 	reduceTasks []Task
 	NReduce     int
 	muMap       sync.Mutex
 	muReduce    sync.Mutex
-}
-
-// Your code here -- RPC handlers for the worker to call.
-
-// Example func
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
 }
 
 // RequestTask func
@@ -177,12 +172,12 @@ func (c *Coordinator) Done() bool {
 	return true
 }
 
-// Backup After waiting for 10s, the coordinator give up and re-issue the task to a different worker.
+// Backup checks if there is any slow task and re-issue the task to a different worker.
 func (c *Coordinator) Backup() {
 	for !c.Done() {
 		c.muMap.Lock()
 		for i, task := range c.mapTasks {
-			if task.Status == INPROGRESS && task.StartTime.Add(time.Second*10).Before(time.Now()) {
+			if task.IsRunningTooSlowly() {
 				c.mapTasks[i].Status = IDLE
 			}
 		}
@@ -190,7 +185,7 @@ func (c *Coordinator) Backup() {
 
 		c.muReduce.Lock()
 		for i, task := range c.reduceTasks {
-			if task.Status == INPROGRESS && task.StartTime.Add(time.Second*10).Before(time.Now()) {
+			if task.IsRunningTooSlowly() {
 				c.reduceTasks[i].Status = IDLE
 			}
 		}
@@ -199,8 +194,7 @@ func (c *Coordinator) Backup() {
 	}
 }
 
-//
-// create a Coordinator.
+// MakeCoordinator create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
@@ -209,7 +203,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	reduceTasks := initReduceTasks(nReduce)
 	c := Coordinator{mapTasks, reduceTasks, nReduce, sync.Mutex{}, sync.Mutex{}}
 	go c.Backup()
-	// Your code here.
 	c.server()
 	return &c
 }
