@@ -18,14 +18,17 @@ package raft
 //
 
 import (
-//	"bytes"
+	//	"bytes"
+
+	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
-//	"6.824/labgob"
+	//	"6.824/labgob"
 	"6.824/labrpc"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -72,12 +75,22 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
+
+	// my state
+	state         State
+	startTickerCh chan bool
+	electionCh    chan chan bool
 }
+
+// State type: at any given time each server is in one of three states: leader, follower, or candidate
 type State int
 
 const (
+	// FOLLOWER is a server's type
 	FOLLOWER State = iota
+	// CANDIDATE is a server's type
 	CANDIDATE
+	// LEADER is a server's type
 	LEADER
 )
 
@@ -88,7 +101,7 @@ type LogEntry struct {
 	command interface{}
 }
 
-// return currentTerm and whether this server
+// GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
@@ -114,7 +127,6 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
 //
 // restore previously persisted state.
 //
@@ -137,8 +149,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-//
+// CondInstallSnapshot func
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 //
@@ -149,7 +160,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
@@ -158,8 +169,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
-//
+// RequestVoteArgs type
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
@@ -171,7 +181,7 @@ type RequestVoteArgs struct {
 	LastLogTerm  int
 }
 
-//
+// RequestVoteReply type
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
@@ -181,8 +191,8 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+// AppendEntriesArgs type
 type AppendEntriesArgs struct {
-	// Your data here (2A, 2B).
 	Term         int
 	LeaderID     int
 	PrevLogIndex int
@@ -190,12 +200,14 @@ type AppendEntriesArgs struct {
 	entries      []LogEntry
 	leaderCommit int
 }
+
+// AppendEntriesReply type
 type AppendEntriesReply struct {
-	// Your data here (2A).
 	Term    int
 	Success bool
 }
-//
+
+// RequestVote func
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -236,8 +248,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
-//
+// Start func
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -258,11 +269,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
-
 	return index, term, isLeader
 }
 
-//
+// Kill func
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -287,15 +297,82 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		<-rf.startTickerCh
 
+		rf.mu.Lock()
+		switch rf.state {
+		case FOLLOWER:
+			tick(150, 300)
+			if len(rf.electionCh) > 0 {
+				<-rf.electionCh <- true
+			}
+			rf.state = CANDIDATE
+			go rf.startElection()
+		case CANDIDATE:
+			tick(150, 300)
+			if len(rf.electionCh) > 0 {
+				<-rf.electionCh <- true
+			}
+			go rf.startElection()
+		case LEADER:
+		}
+		rf.mu.Unlock()
 	}
 }
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	fmt.Println("startElection", rf.me, rf.currentTerm)
+	timeoutCh := make(chan bool)
+	rf.electionCh <- timeoutCh
 
-//
+	rf.currentTerm++
+	rf.votedFor = &rf.me
+
+	rf.startTickerCh <- true
+
+	replyCh := rf.broadcastRequestVote()
+	go func() {
+		defer func() { <-rf.electionCh }()
+		for {
+			select {
+			case <-replyCh:
+				fmt.Println("reply", rf.me)
+				return
+			case <-timeoutCh:
+				fmt.Println("timeout", rf.me)
+				return
+			}
+		}
+	}()
+}
+func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
+	replyCh := make(chan RequestVoteReply, len(rf.peers))
+	replyCh <- RequestVoteReply{}
+	// for target := range rf.peers {
+	// 	if target == rf.me {
+	// 		continue
+	// 	}
+	// 	go func(target, currentTerm int) {
+	// 		args := RequestVoteArgs{currentTerm, rf.me, 0, 0}
+	// 		reply := RequestVoteReply{}
+	// 		if rf.sendRequestVote(target, &args, &reply) {
+	// 			replyCh <- reply
+	// 		}
+	// 	}(target, rf.currentTerm)
+	// }
+	return replyCh
+}
+func tick(min, max int) {
+	rand.Seed(time.Now().UnixNano())
+	d := time.Duration(rand.Intn(max-min+1) + min)
+	time.Sleep(time.Millisecond * d)
+}
+
+// Make func
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -314,13 +391,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.state = FOLLOWER
+
+	rf.startTickerCh = make(chan bool, 1)
+	rf.startTickerCh <- true
+
+	rf.electionCh = make(chan chan bool, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
