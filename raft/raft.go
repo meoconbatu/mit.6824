@@ -63,7 +63,29 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	currentTerm int
+	votedFor    *int
+	log         []LogEntry
 
+	commitIndex int
+	lastApplied int
+
+	nextIndex  []int
+	matchIndex []int
+}
+type State int
+
+const (
+	FOLLOWER State = iota
+	CANDIDATE
+	LEADER
+)
+
+// LogEntry log entries; each entry contains command for state machine,
+// and term when entry was received by leader (first index is 1)
+type LogEntry struct {
+	term    int
+	command interface{}
 }
 
 // return currentTerm and whether this server
@@ -143,6 +165,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateID  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -151,8 +177,24 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	// Your data here (2A, 2B).
+	Term         int
+	LeaderID     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	entries      []LogEntry
+	leaderCommit int
+}
+type AppendEntriesReply struct {
+	// Your data here (2A).
+	Term    int
+	Success bool
+}
 //
 // example RequestVote RPC handler.
 //
