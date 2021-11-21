@@ -99,8 +99,8 @@ const (
 // LogEntry log entries; each entry contains command for state machine,
 // and term when entry was received by leader (first index is 1)
 type LogEntry struct {
-	term    int
-	command interface{}
+	Term    int
+	Command interface{}
 }
 
 // GetState return currentTerm and whether this server
@@ -205,8 +205,8 @@ type AppendEntriesArgs struct {
 	LeaderID     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	entries      []LogEntry
-	leaderCommit int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 // AppendEntriesReply type
@@ -233,7 +233,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		ID := args.CandidateID
 		rf.votedFor = &ID
+
+		rf.convertToFollower()
 	}
+}
+
+// AppendEntries func
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !rf.checkAppendEntriesArgs(*args) {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	reply.Success = true
+	reply.Term = rf.currentTerm
+
+	rf.convertToFollower()
 }
 
 //
@@ -267,6 +284,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -325,23 +346,30 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.startTickerCh:
 			tick(150, 300)
+			// fmt.Println("tick", rf.me)
 			rf.endCurrentElection()
-		case <-rf.startHeatbeatCh:
-			tick(50, 120)
+			if len(rf.startTickerCh) > 0 {
+				continue
+			}
+			// case <-rf.startHeatbeatCh:
+			// 	tick(20, 50)
+			// 	fmt.Println("tick hearbeat", rf.me)
 		}
 
 		rf.mu.Lock()
 		switch rf.state {
 		case FOLLOWER:
 			rf.state = CANDIDATE
-			// fmt.Println("FOLLOWER")
 			go rf.startElection()
 		case CANDIDATE:
-			// fmt.Println("CANDIDATE")
 			go rf.startElection()
 		case LEADER:
-			rf.sendHeartbeat()
-			rf.startHeatbeatCh <- true
+			// fmt.Println("LEADERLEADER", rf.me)
+			// reply := rf.broadcastHeartbeat()
+			// go rf.processHeartbeatReply(reply)
+			// if len(rf.startHeatbeatCh) == 0 {
+			// 	rf.startHeatbeatCh <- true
+			// }
 		}
 		rf.mu.Unlock()
 	}
@@ -357,7 +385,6 @@ func (rf *Raft) endCurrentElection() {
 }
 func (rf *Raft) startTicker() {
 	if len(rf.startTickerCh) == 0 {
-		// fmt.Println("startTicker")
 		rf.startTickerCh <- true
 	}
 }
@@ -369,34 +396,11 @@ func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.votedFor = &rf.me
 
+	// fmt.Println("startElection", rf.me)
 	rf.startTicker()
 
 	replyCh := rf.broadcastRequestVote()
-	go func() {
-		voteCount := int32(1)
-		for {
-			select {
-			case reply := <-replyCh:
-				rf.mu.Lock()
-				if !rf.checkRequestVoteReply(reply) {
-					rf.mu.Unlock()
-					return
-				}
-				if reply.VoteGranted {
-					atomic.AddInt32(&voteCount, 1)
-				}
-				if int(atomic.LoadInt32(&voteCount)) > len(rf.peers)/2 {
-					rf.convertToLeader()
-					rf.mu.Unlock()
-					fmt.Println("reply leader", rf.me)
-					return
-				}
-				rf.mu.Unlock()
-			case <-timeoutCh:
-				return
-			}
-		}
-	}()
+	go rf.processRequestVoteReply(replyCh, timeoutCh)
 }
 func (rf *Raft) checkRequestVoteReply(reply RequestVoteReply) bool {
 	if reply.Term > rf.currentTerm {
@@ -408,26 +412,90 @@ func (rf *Raft) checkRequestVoteReply(reply RequestVoteReply) bool {
 }
 
 func (rf *Raft) checkRequestVoteArgs(args RequestVoteArgs) bool {
+	if args.Term < rf.currentTerm {
+		return false
+	}
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
+		rf.convertToFollower()
+	}
+	return true
+}
+
+func (rf *Raft) checkAppendEntriesReply(reply AppendEntriesReply) bool {
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
 		rf.convertToFollower()
 		return false
 	}
 	return true
 }
+
+func (rf *Raft) checkAppendEntriesArgs(args AppendEntriesArgs) bool {
+	if args.Term < rf.currentTerm {
+		return false
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.convertToFollower()
+	}
+	return true
+}
 func (rf *Raft) convertToFollower() {
+
+	// fmt.Println("convertToFollower", rf.me)
 	rf.state = FOLLOWER
 	rf.votedFor = nil
-
 	rf.startTicker()
 }
 func (rf *Raft) convertToLeader() {
 	rf.state = LEADER
+	go func() {
+		for {
+			rf.mu.Lock()
+			if rf.state != LEADER {
+				rf.mu.Unlock()
+				return
+			}
+			reply := rf.broadcastHeartbeat()
+			rf.mu.Unlock()
+			go rf.processHeartbeatReply(reply)
 
-	rf.sendHeartbeat()
-	rf.startHeatbeatCh <- true
+			tick(50, 120)
+		}
+	}()
 }
-func (rf *Raft) sendHeartbeat() {
+func (rf *Raft) broadcastHeartbeat() chan AppendEntriesReply {
+	replyCh := make(chan AppendEntriesReply, len(rf.peers))
+	currentTime := rf.currentTerm
+	for target := range rf.peers {
+		if target == rf.me {
+			continue
+		}
+		go func(target, currentTerm int) {
+			args := AppendEntriesArgs{currentTerm, rf.me, 0, 0, nil, 0}
+			reply := AppendEntriesReply{}
+			if rf.sendAppendEntries(target, &args, &reply) {
+				// fmt.Println(rf.me, target, args, reply)
+				replyCh <- reply
+			}
+		}(target, currentTime)
+	}
+	return replyCh
+}
+
+func (rf *Raft) processHeartbeatReply(replyCh chan AppendEntriesReply) {
+	for {
+		select {
+		case reply := <-replyCh:
+			rf.mu.Lock()
+			if !rf.checkAppendEntriesReply(reply) {
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+		}
+	}
 }
 func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 	replyCh := make(chan RequestVoteReply, len(rf.peers))
@@ -440,11 +508,39 @@ func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 			args := RequestVoteArgs{currentTerm, rf.me, 0, 0}
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(target, &args, &reply) {
+				// fmt.Println(rf.me, target, args, reply)
 				replyCh <- reply
 			}
 		}(target, currentTime)
 	}
 	return replyCh
+}
+
+func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh chan bool) {
+	voteCount := int32(1)
+	for {
+		select {
+		case reply := <-replyCh:
+			rf.mu.Lock()
+			if !rf.checkRequestVoteReply(reply) {
+				rf.mu.Unlock()
+				return
+			}
+			if reply.VoteGranted {
+				atomic.AddInt32(&voteCount, 1)
+			}
+			if int(atomic.LoadInt32(&voteCount)) > len(rf.peers)/2 {
+				rf.convertToLeader()
+				fmt.Println("LEADER", rf.me)
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+		case <-timeoutCh:
+			// fmt.Println("timeout", rf.me)
+			return
+		}
+	}
 }
 func tick(min, max int) {
 	rand.Seed(time.Now().UnixNano())
