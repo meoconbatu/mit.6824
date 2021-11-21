@@ -80,6 +80,8 @@ type Raft struct {
 	state         State
 	startTickerCh chan bool
 	electionCh    chan chan bool
+
+	startHeatbeatCh chan bool
 }
 
 // State type: at any given time each server is in one of three states: leader, follower, or candidate
@@ -107,6 +109,12 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state == LEADER {
+		isleader = true
+	}
+	term = rf.currentTerm
 	// Your code here (2A).
 	return term, isleader
 }
@@ -212,6 +220,20 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !rf.checkRequestVoteArgs(*args) {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+	if rf.votedFor == nil || *rf.votedFor == args.CandidateID {
+		reply.VoteGranted = true
+		reply.Term = rf.currentTerm
+
+		ID := args.CandidateID
+		rf.votedFor = &ID
+	}
 }
 
 //
@@ -300,70 +322,128 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		<-rf.startTickerCh
+		select {
+		case <-rf.startTickerCh:
+			tick(150, 300)
+			rf.endCurrentElection()
+		case <-rf.startHeatbeatCh:
+			tick(50, 120)
+		}
 
 		rf.mu.Lock()
 		switch rf.state {
 		case FOLLOWER:
-			tick(150, 300)
-			if len(rf.electionCh) > 0 {
-				<-rf.electionCh <- true
-			}
 			rf.state = CANDIDATE
+			// fmt.Println("FOLLOWER")
 			go rf.startElection()
 		case CANDIDATE:
-			tick(150, 300)
-			if len(rf.electionCh) > 0 {
-				<-rf.electionCh <- true
-			}
+			// fmt.Println("CANDIDATE")
 			go rf.startElection()
 		case LEADER:
+			rf.sendHeartbeat()
+			rf.startHeatbeatCh <- true
 		}
 		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) endCurrentElection() {
+	if len(rf.electionCh) > 0 {
+		<-rf.electionCh <- true
+	}
+	for len(rf.electionCh) == 0 {
+		return
+	}
+}
+func (rf *Raft) startTicker() {
+	if len(rf.startTickerCh) == 0 {
+		// fmt.Println("startTicker")
+		rf.startTickerCh <- true
 	}
 }
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Println("startElection", rf.me, rf.currentTerm)
 	timeoutCh := make(chan bool)
 	rf.electionCh <- timeoutCh
-
 	rf.currentTerm++
 	rf.votedFor = &rf.me
 
-	rf.startTickerCh <- true
+	rf.startTicker()
 
 	replyCh := rf.broadcastRequestVote()
 	go func() {
-		defer func() { <-rf.electionCh }()
+		voteCount := int32(1)
 		for {
 			select {
-			case <-replyCh:
-				fmt.Println("reply", rf.me)
-				return
+			case reply := <-replyCh:
+				rf.mu.Lock()
+				if !rf.checkRequestVoteReply(reply) {
+					rf.mu.Unlock()
+					return
+				}
+				if reply.VoteGranted {
+					atomic.AddInt32(&voteCount, 1)
+				}
+				if int(atomic.LoadInt32(&voteCount)) > len(rf.peers)/2 {
+					rf.convertToLeader()
+					rf.mu.Unlock()
+					fmt.Println("reply leader", rf.me)
+					return
+				}
+				rf.mu.Unlock()
 			case <-timeoutCh:
-				fmt.Println("timeout", rf.me)
 				return
 			}
 		}
 	}()
 }
+func (rf *Raft) checkRequestVoteReply(reply RequestVoteReply) bool {
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.convertToFollower()
+		return false
+	}
+	return true
+}
+
+func (rf *Raft) checkRequestVoteArgs(args RequestVoteArgs) bool {
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.convertToFollower()
+		return false
+	}
+	return true
+}
+func (rf *Raft) convertToFollower() {
+	rf.state = FOLLOWER
+	rf.votedFor = nil
+
+	rf.startTicker()
+}
+func (rf *Raft) convertToLeader() {
+	rf.state = LEADER
+
+	rf.sendHeartbeat()
+	rf.startHeatbeatCh <- true
+}
+func (rf *Raft) sendHeartbeat() {
+}
 func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 	replyCh := make(chan RequestVoteReply, len(rf.peers))
-	replyCh <- RequestVoteReply{}
-	// for target := range rf.peers {
-	// 	if target == rf.me {
-	// 		continue
-	// 	}
-	// 	go func(target, currentTerm int) {
-	// 		args := RequestVoteArgs{currentTerm, rf.me, 0, 0}
-	// 		reply := RequestVoteReply{}
-	// 		if rf.sendRequestVote(target, &args, &reply) {
-	// 			replyCh <- reply
-	// 		}
-	// 	}(target, rf.currentTerm)
-	// }
+	currentTime := rf.currentTerm
+	for target := range rf.peers {
+		if target == rf.me {
+			continue
+		}
+		go func(target, currentTerm int) {
+			args := RequestVoteArgs{currentTerm, rf.me, 0, 0}
+			reply := RequestVoteReply{}
+			if rf.sendRequestVote(target, &args, &reply) {
+				replyCh <- reply
+			}
+		}(target, currentTime)
+	}
 	return replyCh
 }
 func tick(min, max int) {
@@ -394,7 +474,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 
 	rf.startTickerCh = make(chan bool, 1)
-	rf.startTickerCh <- true
+	rf.startTicker()
+
+	rf.startHeatbeatCh = make(chan bool, 1)
 
 	rf.electionCh = make(chan chan bool, 1)
 
