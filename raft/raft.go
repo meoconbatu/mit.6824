@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -234,7 +233,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		ID := args.CandidateID
 		rf.votedFor = &ID
 
-		rf.convertToFollower()
+		rf.convertToFollowerAfterVote()
+	} else {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
 	}
 }
 
@@ -343,18 +345,16 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		select {
-		case <-rf.startTickerCh:
-			tick(150, 300)
-			// fmt.Println("tick", rf.me)
-			rf.endCurrentElection()
-			if len(rf.startTickerCh) > 0 {
-				continue
-			}
-			// case <-rf.startHeatbeatCh:
-			// 	tick(20, 50)
-			// 	fmt.Println("tick hearbeat", rf.me)
+		// select {
+		<-rf.startTickerCh
+		tick(200, 300)
+		rf.endCurrentElection()
+		if len(rf.startTickerCh) > 0 {
+			continue
 		}
+		// case <-rf.startHeatbeatCh:
+		// 	tick(20, 50)
+		// }
 
 		rf.mu.Lock()
 		switch rf.state {
@@ -364,7 +364,6 @@ func (rf *Raft) ticker() {
 		case CANDIDATE:
 			go rf.startElection()
 		case LEADER:
-			// fmt.Println("LEADERLEADER", rf.me)
 			// reply := rf.broadcastHeartbeat()
 			// go rf.processHeartbeatReply(reply)
 			// if len(rf.startHeatbeatCh) == 0 {
@@ -378,9 +377,6 @@ func (rf *Raft) ticker() {
 func (rf *Raft) endCurrentElection() {
 	if len(rf.electionCh) > 0 {
 		<-rf.electionCh <- true
-	}
-	for len(rf.electionCh) == 0 {
-		return
 	}
 }
 func (rf *Raft) startTicker() {
@@ -442,10 +438,13 @@ func (rf *Raft) checkAppendEntriesArgs(args AppendEntriesArgs) bool {
 	return true
 }
 func (rf *Raft) convertToFollower() {
-
-	// fmt.Println("convertToFollower", rf.me)
 	rf.state = FOLLOWER
 	rf.votedFor = nil
+	rf.startTicker()
+}
+
+func (rf *Raft) convertToFollowerAfterVote() {
+	rf.state = FOLLOWER
 	rf.startTicker()
 }
 func (rf *Raft) convertToLeader() {
@@ -461,7 +460,7 @@ func (rf *Raft) convertToLeader() {
 			rf.mu.Unlock()
 			go rf.processHeartbeatReply(reply)
 
-			tick(50, 120)
+			tick(110, 120)
 		}
 	}()
 }
@@ -517,6 +516,9 @@ func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 }
 
 func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh chan bool) {
+	defer func() {
+		<-rf.electionCh
+	}()
 	voteCount := int32(1)
 	for {
 		select {
@@ -531,7 +533,6 @@ func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh
 			}
 			if int(atomic.LoadInt32(&voteCount)) > len(rf.peers)/2 {
 				rf.convertToLeader()
-				fmt.Println("LEADER", rf.me)
 				rf.mu.Unlock()
 				return
 			}
