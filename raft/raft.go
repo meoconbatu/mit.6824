@@ -254,6 +254,16 @@ type AppendEntriesReply struct {
 	Term int
 	// true if follower contained entry matching prevLogIndex and prevLogTerm
 	Success bool
+
+	// additional information to reduce the number of rejected AppendEntries RPCs
+	// to back up quickly
+
+	// term in the conflicting entry (0 if not exists)
+	XTerm int
+	//  index of first entry with that term (0 if not exists)
+	XIndex int
+	// log length
+	XLen int
 }
 
 // Set func uses to set values for reply obj.
@@ -313,11 +323,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If AppendEntries RPC received from new leader: convert to follower
 	rf.convertToFollower()
 
-	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-	if args.PrevLogIndex > rf.getLastLogIndex() || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex > rf.getLastLogIndex() {
+		reply.XLen = rf.getLastLogIndex()
+
 		reply.Set(rf.currentTerm, false)
 		return
 	}
+
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+
+		// find index of first entry with reply.XTerm
+		xIndex := args.PrevLogIndex
+		for i := args.PrevLogIndex - 1; i >= 0; i-- {
+			if reply.XTerm == rf.log[i].Term {
+				xIndex = i
+			}
+			break
+		}
+		reply.XIndex = xIndex
+		reply.Set(rf.currentTerm, false)
+		return
+	}
+
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	// if args.PrevLogIndex > rf.getLastLogIndex() || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	// 	reply.Set(rf.currentTerm, false)
+	// 	return
+	// }
 
 	// If an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it
@@ -607,7 +640,6 @@ func (rf *Raft) startSendAppendEntriesLoop() {
 	}
 }
 
-// invoked by leader to replicate log entries; also used as heartbeat
 func (rf *Raft) broadcastAppendEntries() {
 	for target := range rf.peers {
 		if target == rf.me {
@@ -620,6 +652,7 @@ func (rf *Raft) broadcastAppendEntries() {
 		args := AppendEntriesArgs{rf.currentTerm, rf.me, nextIndex - 1, rf.log[nextIndex-1].Term,
 			rf.log[nextIndex : lastLogIndex+1], rf.commitIndex}
 		reply := AppendEntriesReply{}
+
 		go func(target int) {
 			if rf.sendAppendEntries(target, &args, &reply) {
 				rf.mu.Lock()
@@ -633,7 +666,34 @@ func (rf *Raft) broadcastAppendEntries() {
 					rf.matchIndex[target] = args.PrevLogIndex + len(args.Entries)
 					rf.nextIndex[target] = rf.matchIndex[target] + 1
 				} else {
-					rf.nextIndex[target]--
+					// roll back quickly, instead of
+					// rf.nextIndex[target]--
+
+					// follower's log is too short
+					if reply.XTerm == 0 {
+						rf.nextIndex[target] = reply.XLen
+
+						rf.mu.Unlock()
+						return
+					}
+					// find leader's last entry for XTerm
+					xTermIndex := -1
+					for i := args.PrevLogIndex; i >= 0; i-- {
+						if rf.log[i].Term < reply.XTerm {
+							break
+						}
+						if rf.log[i].Term == reply.XTerm {
+							xTermIndex = i
+						}
+					}
+
+					if xTermIndex != -1 { // leader doesn't have XTerm
+						rf.nextIndex[target] = xTermIndex
+					} else { // leader has XTerm
+						rf.nextIndex[target] = reply.XIndex
+					}
+
+					// logger.Info(rf.me, args)
 
 					rf.mu.Unlock()
 					return
@@ -642,6 +702,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				// If there exists an N such that N > commitIndex, a majority
 				// of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
 				logger.Debug("matchIndex", rf.matchIndex, rf.commitIndex, args, rf.currentTerm)
+
 				for N := rf.commitIndex + 1; N < len(rf.log); N++ {
 					count := 1
 					for _, index := range rf.matchIndex {
