@@ -21,13 +21,22 @@ import (
 	//	"bytes"
 
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
+	"github.com/sirupsen/logrus"
 )
+
+var logger = &logrus.Logger{
+	Out:       os.Stderr,
+	Formatter: new(logrus.TextFormatter),
+	Hooks:     make(logrus.LevelHooks),
+	Level:     logrus.InfoLevel,
+}
 
 // ApplyMsg type
 // as each Raft peer becomes aware that successive log entries are
@@ -272,7 +281,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// candidate has same last term and same length or longer log
 		lastLog := rf.getLastLogEntry()
 		lastLogIndex := rf.getLastLogIndex()
-		// fmt.Println(args.CandidateID, rf.me, args.LastLogIndex, args.LastLogTerm, lastLog, lastLogIndex)
 		if args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLogIndex) {
 			// grant vote
 			reply.Set(rf.currentTerm, true)
@@ -333,7 +341,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
-		// fmt.Println("commitIndex", rf.commitIndex, rf.me)
+		logger.Debug("commitIndex", rf.commitIndex, rf.me)
 	}
 
 	reply.Set(rf.currentTerm, true)
@@ -415,8 +423,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	newEntry := LogEntry{rf.currentTerm, command}
 	rf.log = append(rf.log, newEntry)
-	// fmt.Println("start", rf.me, rf.log)
-	// rf.broadcastAppendEntries()
+
+	logger.Debug("start", rf.me, rf.log)
 
 	return rf.getLastLogIndex(), rf.currentTerm, rf.isLeader()
 }
@@ -500,7 +508,8 @@ func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.votedFor = &rf.me
 
-	// fmt.Println("startElection", rf.me)
+	logger.Debug("startElection", rf.me)
+
 	rf.startElectionTimer()
 
 	replyCh := rf.broadcastRequestVote()
@@ -520,7 +529,7 @@ func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 			args := RequestVoteArgs{currentTerm, rf.me, lastLogIndex, lastLog.Term}
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(target, &args, &reply) {
-				// fmt.Println("sendRequestVote", rf.me, target, args, reply)
+				logger.Debug("sendRequestVote", rf.me, target, args, reply)
 				replyCh <- reply
 			}
 		}(target, rf.currentTerm)
@@ -543,10 +552,6 @@ func (rf *Raft) broadcastAppendEntries() {
 		reply := AppendEntriesReply{}
 		go func(target int) {
 			if rf.sendAppendEntries(target, &args, &reply) {
-				// if len(args.Entries) > 0 {
-				// 	fmt.Println("sendAppendEntries", rf.me, target, args.Entries, args.LeaderCommit, reply)
-				// }
-				// replyCh <- reply
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
@@ -566,7 +571,7 @@ func (rf *Raft) broadcastAppendEntries() {
 				}
 				// If there exists an N such that N > commitIndex, a majority
 				// of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
-				// fmt.Println("matchIndex", rf.matchIndex, rf.commitIndex, args, rf.currentTerm)
+				logger.Debug("matchIndex", rf.matchIndex, rf.commitIndex, args, rf.currentTerm)
 				for N := rf.commitIndex + 1; N < len(rf.log); N++ {
 					count := 1
 					for _, index := range rf.matchIndex {
@@ -575,7 +580,7 @@ func (rf *Raft) broadcastAppendEntries() {
 						}
 					}
 					if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
-						// fmt.Println("commitindex=", N, rf.matchIndex)
+						logger.Debug("commitindex=", N, rf.matchIndex)
 						rf.commitIndex = N
 						break
 					}
@@ -596,7 +601,7 @@ func (rf *Raft) convertToFollower() {
 
 func (rf *Raft) convertToLeader() {
 	rf.state = LEADER
-	// fmt.Println("LEADER", rf.me)
+	logger.Debug("LEADER", rf.me)
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = rf.getLastLogIndex() + 1
@@ -645,7 +650,7 @@ func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh
 			}
 			rf.mu.Unlock()
 		case <-timeoutCh:
-			// fmt.Println("timeout", rf.me)
+			logger.Debug("timeout", rf.me)
 			return
 		}
 	}
@@ -693,15 +698,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) startApplyLogLoop(applyCh chan ApplyMsg) {
 	for {
 		rf.mu.Lock()
-		// fmt.Println(rf.log, rf.me)
+		logger.Debug(rf.log, rf.me)
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
+
 			msg := ApplyMsg{}
 			msg.Command = rf.log[rf.lastApplied].Command
 			msg.CommandIndex = rf.lastApplied
 			msg.CommandValid = true
-			// fmt.Println("apply", rf.lastApplied, rf.me)
+
 			applyCh <- msg
+
+			logger.Debug("apply", rf.lastApplied, rf.me)
 		}
 		rf.mu.Unlock()
 
