@@ -19,7 +19,6 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
 	"math/rand"
 	"os"
 	"sync"
@@ -128,20 +127,19 @@ func (rf *Raft) getLastLogEntry() LogEntry {
 func (rf *Raft) getLastLogIndex() int {
 	return len(rf.Log) + rf.LastIncludedIndex - 1
 }
+
 func (rf *Raft) logAt(index int) LogEntry {
-	if index-rf.LastIncludedIndex < 0 {
-		fmt.Println(rf.lastApplied, rf.commitIndex, index, rf.LastIncludedIndex, len(rf.Log), rf.me) //1 99 4 2
-		// 1 17 1 9 10 0
-		// rf.commitIndex > rf.lastApplied
-	}
 	return rf.Log[index-rf.LastIncludedIndex]
 }
+
 func (rf *Raft) logFrom(index int) []LogEntry {
 	return rf.subLog(index, rf.getLastLogIndex())
 }
+
 func (rf *Raft) logTo(index int) []LogEntry {
 	return rf.subLog(rf.LastIncludedIndex, index)
 }
+
 func (rf *Raft) subLog(from, to int) []LogEntry {
 	return rf.Log[from-rf.LastIncludedIndex : to-rf.LastIncludedIndex+1]
 }
@@ -221,8 +219,10 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 // CondInstallSnapshot func
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
+// The service reads from applyCh, and invokes CondInstallSnapshot with the snapshot to tell Raft that
+// the service is switching to the passed-in snapshot state, and that Raft should update its log at the same time.
+//
+// Only switch to snapshot if Raft hasn't have more recent info since it communicate the snapshot on applyCh.
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	rf.mu.Lock()
@@ -230,9 +230,13 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 	// Your code here (2D).
 	logger.Debug("CondInstallSnapshot me, lastIndex, lastTerm, lastApplied ", rf.me, lastIncludedIndex, lastIncludedTerm, rf.lastApplied)
+
+	// refuse to install a snapshot if it is an old snapshot:
+	// Raft has processed entries after the snapshot's lastIncludedTerm/lastIncludedIndex
 	if lastIncludedIndex <= rf.lastApplied {
 		return false
 	}
+
 	if lastIncludedIndex >= rf.getLastLogIndex() {
 		rf.Log = []LogEntry{{}}
 	} else {
@@ -244,29 +248,27 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.lastApplied = lastIncludedIndex
 	rf.commitIndex = lastIncludedIndex
 
-	// if rf.logAt(lastIncludedIndex).Term == lastIncludedTerm {
-	// 	rf.LastIncludedIndex = lastIncludedIndex
-	// 	rf.LastIncludedTerm = lastIncludedTerm
-
 	rf.persistStateAndSnapshot(snapshot)
 
-	// 	return true
-	// }
 	return true
 }
 
-// Snapshot the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
+// Snapshot func
+//
+// the service says it has created a snapshot that has all info up to and including index.
+// this means the service no longer needs the log through (and including) that index.
+// Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	logger.Debug("SNAPSHOT rf.me, index", rf.me, index)
+
 	rf.LastIncludedTerm = rf.logAt(index).Term
 	rf.Log = append([]LogEntry{rf.Log[0]}, rf.logFrom(index+1)...)
 	rf.LastIncludedIndex = index
+
 	rf.persistStateAndSnapshot(snapshot)
 }
 
@@ -283,8 +285,7 @@ func (rf *Raft) persistStateAndSnapshot(snapshot []byte) {
 }
 
 // RequestVoteArgs type
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
+// RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
@@ -300,9 +301,7 @@ type RequestVoteArgs struct {
 }
 
 // RequestVoteReply type
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
+// RequestVote RPC reply structure.
 type RequestVoteReply struct {
 	// Your data here (2A).
 
@@ -319,6 +318,7 @@ func (reply *RequestVoteReply) Set(term int, voteGranted bool) {
 }
 
 // AppendEntriesArgs type
+// AppendEntries RPC arguments structure
 type AppendEntriesArgs struct {
 	// leader’s term
 	Term int
@@ -335,6 +335,7 @@ type AppendEntriesArgs struct {
 }
 
 // AppendEntriesReply type
+// AppendEntries RPC reply structure
 type AppendEntriesReply struct {
 	// currentTerm, for leader to update itself
 	Term int
@@ -359,6 +360,7 @@ func (reply *AppendEntriesReply) Set(term int, success bool) {
 }
 
 // InstallSnapshotArgs type
+// InstallSnapshot RPC arguments structure
 type InstallSnapshotArgs struct {
 	// leader’s term
 	Term int
@@ -377,6 +379,7 @@ type InstallSnapshotArgs struct {
 }
 
 // InstallSnapshotReply type
+// InstallSnapshot RPC reply structure
 type InstallSnapshotReply struct {
 	// currentTerm, for leader to update itself
 	Term int
@@ -508,7 +511,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // InstallSnapshot is a RPC handler
 // The leader uses a new RPC called InstallSnapshot to send snapshots to followers that are too far behind; see Figure 13.
-//  When a follower receives a snapshot with this RPC, it must decide what to do with its existing log en- tries.
+// When a follower receives a snapshot with this RPC, it must decide what to do with its existing log en- tries.
 // Usually the snapshot will contain new information not already in the recipient’s log.
 // In this case, the follower discards its entire log; it is all superseded by the snapshot
 // and may possibly have uncommitted entries that conflict with the snapshot.
@@ -750,7 +753,7 @@ func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 			args := RequestVoteArgs{currentTerm, rf.me, lastLogIndex, lastLog.Term}
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(target, &args, &reply) {
-				// logger.Debug("sendRequestVote ", rf.me, target, args, reply)
+				logger.Debug("sendRequestVote ", rf.me, target, args, reply)
 
 				replyCh <- reply
 			}
@@ -855,7 +858,7 @@ func (rf *Raft) broadcastAppendEntries() {
 		// else log entries is empty, used as hearbeat.
 		nextIndex := rf.nextIndex[target]
 		lastLogIndex := rf.getLastLogIndex()
-		// logger.Debug("nextIndex <= rf.LastIncludedIndex ", rf.me, target, nextIndex, rf.LastIncludedIndex)
+
 		if nextIndex <= rf.LastIncludedIndex {
 			args := InstallSnapshotArgs{rf.CurrentTerm, rf.me, rf.LastIncludedIndex, rf.LastIncludedTerm, 0, rf.persister.ReadSnapshot(), true}
 			go func(target int, args InstallSnapshotArgs) {
@@ -865,12 +868,14 @@ func (rf *Raft) broadcastAppendEntries() {
 					if reply.Term > rf.CurrentTerm {
 						rf.CurrentTerm = reply.Term
 						rf.convertToFollower()
+
 						rf.persist()
 						rf.mu.Unlock()
 						return
 					}
 					rf.matchIndex[target] = args.LastIncludedIndex
 					rf.nextIndex[target] = rf.matchIndex[target] + 1
+
 					rf.mu.Unlock()
 				}
 			}(target, args)
@@ -878,7 +883,7 @@ func (rf *Raft) broadcastAppendEntries() {
 		}
 		var entries []LogEntry
 		var prevLogIndex, prevLogTerm int
-		// logger.Debug(lastLogIndex, nextIndex)
+
 		if lastLogIndex >= nextIndex {
 			entries = rf.subLog(nextIndex, lastLogIndex)
 			prevLogIndex = nextIndex - 1
@@ -945,7 +950,6 @@ func (rf *Raft) broadcastAppendEntries() {
 
 				// If there exists an N such that N > commitIndex, a majority
 				// of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
-
 				for N := rf.getLastLogIndex(); N > rf.commitIndex; N-- {
 					count := 1
 					for _, index := range rf.matchIndex {
@@ -1020,9 +1024,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) startApplyLogLoop(applyCh chan ApplyMsg) {
 	for {
 		rf.mu.Lock()
-		// if rf.lastApplied < rf.LastIncludedIndex {
-		// 	rf.lastApplied = rf.LastIncludedIndex
-		// }
 		if rf.commitIndex > rf.lastApplied && rf.lastApplied >= rf.LastIncludedIndex {
 			rf.lastApplied++
 
