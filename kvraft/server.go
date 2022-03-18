@@ -1,12 +1,13 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
 const Debug = false
@@ -18,13 +19,28 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Type string
 }
 
+// RequestInfo
+// indexed by client ID, contains just seq #, and value if already executed
+// RPC handler first checks table, only Start()s if seq # > table entry
+// each log entry must include client ID, seq #
+// when operation appears on applyCh
+//   update the seq # and value in the client's table entry
+//   wake up the waiting RPC handler (if any)
+type RequestInfo struct {
+	// unique identifier for each client
+	clientID int
+	// each request is tagged with a monotonically increasing sequence number
+	seq int
+	// value if already executed
+	value interface{}
+}
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -35,15 +51,58 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	// a simple database of key/value pairs
+	db map[string]string
+	// contains message from apply ch
+	logs map[int]bool
+	c    sync.Cond
+	// keeps track of the latest sequence number it has seen for each client
+	requests []RequestInfo
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{"Get"}
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	kv.mu.Lock()
+	for !kv.logs[index] {
+		kv.c.Wait()
+	}
+	delete(kv.logs, index)
+	if val, ok := kv.db[args.Key]; !ok {
+		reply.Err = ErrNoKey
+	} else {
+		reply.Value = val
+		reply.Err = OK
+	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{args.Op}
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.Lock()
+	for !kv.logs[index] {
+		kv.c.Wait()
+	}
+	delete(kv.logs, index)
+	if args.Op == "Put" {
+		kv.db[args.Key] = args.Value
+	} else {
+		kv.db[args.Key] += args.Value
+	}
+	kv.mu.Unlock()
+	reply.Err = OK
 }
 
 //
@@ -85,6 +144,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	// labgob.Register(GetArgs{})
+	// labgob.Register(GetReply{})
+	// labgob.Register(PutAppendArgs{})
+	// labgob.Register(PutAppendReply{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -96,6 +159,25 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.c = *sync.NewCond(&kv.mu)
+
+	kv.db = make(map[string]string)
+	kv.logs = make(map[int]bool)
+
+	go kv.applier()
 
 	return kv
+}
+func (kv *KVServer) applier() {
+	for m := range kv.applyCh {
+		if m.CommandValid == false {
+		} else {
+			kv.mu.Lock()
+
+			kv.logs[m.CommandIndex] = true
+
+			kv.mu.Unlock()
+			kv.c.Broadcast()
+		}
+	}
 }
