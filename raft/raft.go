@@ -835,21 +835,27 @@ func (rf *Raft) convertToLeader() {
 }
 
 func (rf *Raft) startSendAppendEntriesLoop() {
+	i := 0
 	for {
 		rf.mu.Lock()
 		if !rf.isLeader() {
 			rf.mu.Unlock()
 			return
 		}
-		rf.broadcastAppendEntries()
-
+		if i == 6 {
+			rf.broadcastAppendEntries(true)
+			i = 0
+		} else {
+			rf.broadcastAppendEntries(false)
+		}
 		rf.mu.Unlock()
+		i++
 
-		tick(80, 120)
+		tick(20, 20)
 	}
 }
 
-func (rf *Raft) broadcastAppendEntries() {
+func (rf *Raft) broadcastAppendEntries(isHeartbeat bool) {
 	for target := 0; target < rf.n; target++ {
 		if target == rf.me {
 			continue
@@ -897,7 +903,9 @@ func (rf *Raft) broadcastAppendEntries() {
 		}
 		args := AppendEntriesArgs{rf.CurrentTerm, rf.me, prevLogIndex, prevLogTerm,
 			entries, rf.commitIndex}
-
+		if !isHeartbeat && len(entries) == 0 {
+			continue
+		}
 		go func(target int, args AppendEntriesArgs) {
 			reply := AppendEntriesReply{}
 
@@ -1040,6 +1048,6 @@ func (rf *Raft) startApplyLogLoop(applyCh chan ApplyMsg) {
 		}
 		rf.mu.Unlock()
 
-		tick(10, 20)
+		tick(1, 2)
 	}
 }
