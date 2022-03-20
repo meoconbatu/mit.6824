@@ -23,7 +23,9 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Type string
+	Type  string
+	Key   string
+	Value string
 }
 
 // RequestInfo
@@ -54,15 +56,14 @@ type KVServer struct {
 	// a simple database of key/value pairs
 	db map[string]string
 	// contains message from apply ch
-	logs map[int]bool
-	c    sync.Cond
+	logs map[int]chan bool
 	// keeps track of the latest sequence number it has seen for each client
 	requests []RequestInfo
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	op := Op{"Get"}
+	op := Op{"Get", args.Key, ""}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -70,9 +71,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	kv.mu.Lock()
-	for !kv.logs[index] {
-		kv.c.Wait()
-	}
+	kv.logs[index] = make(chan bool)
+	kv.mu.Unlock()
+
+	<-kv.logs[index]
+
+	kv.mu.Lock()
 	delete(kv.logs, index)
 	if val, ok := kv.db[args.Key]; !ok {
 		reply.Err = ErrNoKey
@@ -85,24 +89,23 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	op := Op{args.Op}
+	op := Op{args.Op, args.Key, args.Value}
 	index, _, isLeader := kv.rf.Start(op)
+
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 	kv.mu.Lock()
-	for !kv.logs[index] {
-		kv.c.Wait()
-	}
-	delete(kv.logs, index)
-	if args.Op == "Put" {
-		kv.db[args.Key] = args.Value
-	} else {
-		kv.db[args.Key] += args.Value
-	}
+	kv.logs[index] = make(chan bool)
 	kv.mu.Unlock()
+
+	<-kv.logs[index]
 	reply.Err = OK
+
+	kv.mu.Lock()
+	delete(kv.logs, index)
+	kv.mu.Unlock()
 }
 
 //
@@ -144,10 +147,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-	// labgob.Register(GetArgs{})
-	// labgob.Register(GetReply{})
-	// labgob.Register(PutAppendArgs{})
-	// labgob.Register(PutAppendReply{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -159,10 +158,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.c = *sync.NewCond(&kv.mu)
-
 	kv.db = make(map[string]string)
-	kv.logs = make(map[int]bool)
+	kv.logs = make(map[int]chan bool)
 
 	go kv.applier()
 
@@ -170,14 +167,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
-		if m.CommandValid == false {
-		} else {
+		if m.CommandValid {
 			kv.mu.Lock()
-
-			kv.logs[m.CommandIndex] = true
-
+			kv.logs[m.CommandIndex] <- true
 			kv.mu.Unlock()
-			kv.c.Broadcast()
+
+			kv.mu.Lock()
+			op := m.Command.(Op)
+			if op.Type == "Put" {
+				kv.db[op.Key] = op.Value
+			} else if op.Type == "Append" {
+				kv.db[op.Key] += op.Value
+			}
+			kv.mu.Unlock()
 		}
 	}
 }
