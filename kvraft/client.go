@@ -3,6 +3,8 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.824/labrpc"
@@ -16,9 +18,11 @@ type Clerk struct {
 	uid int64
 	// current sequence number (increase monotonically)
 	// If a client re-sends a request, it re-uses the same sequence number.
-	currentSeqNum int
-	// remember which server turned out to be the leader for the last RPC, and send the next RPC to that server first
+	currentSeqNum int64
+	// remember which server turned out to be the leader for the last RPC,
+	// and send the next RPC to that server first
 	currentLeader int
+	mu            sync.Mutex
 }
 
 func nrand() int64 {
@@ -51,10 +55,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	args := GetArgs{key}
+	args := GetArgs{key, int(ck.uid), int(atomic.AddInt64(&ck.currentSeqNum, 1))}
 	reply := GetReply{}
 	for i := ck.currentLeader; ; i = (i + 1) % len(ck.servers) {
-		if ok := ck.servers[i].Call("KVServer.Get", &args, &reply); ok {
+		if ck.servers[i].Call("KVServer.Get", &args, &reply) {
 			if reply.Err != ErrWrongLeader {
 				ck.currentLeader = i
 				return reply.Value
@@ -76,10 +80,10 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
+	args := PutAppendArgs{key, value, op, int(ck.uid), int(atomic.AddInt64(&ck.currentSeqNum, 1))}
 	reply := PutAppendReply{}
 	for i := ck.currentLeader; ; i = (i + 1) % len(ck.servers) {
-		if ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply); ok {
+		if ck.servers[i].Call("KVServer.PutAppend", &args, &reply) {
 			if reply.Err != ErrWrongLeader {
 				ck.currentLeader = i
 				return

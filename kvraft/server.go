@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -26,22 +27,21 @@ type Op struct {
 	Type  string
 	Key   string
 	Value string
+
+	ClientID int
+	Seq      int
+	Index    int
 }
 
 // RequestInfo
 // indexed by client ID, contains just seq #, and value if already executed
 // RPC handler first checks table, only Start()s if seq # > table entry
 // each log entry must include client ID, seq #
-// when operation appears on applyCh
-//   update the seq # and value in the client's table entry
-//   wake up the waiting RPC handler (if any)
 type RequestInfo struct {
-	// unique identifier for each client
-	clientID int
 	// each request is tagged with a monotonically increasing sequence number
-	seq int
+	Seq int
 	// value if already executed
-	value interface{}
+	Value string
 }
 type KVServer struct {
 	mu      sync.Mutex
@@ -55,57 +55,88 @@ type KVServer struct {
 	// Your definitions here.
 	// a simple database of key/value pairs
 	db map[string]string
-	// contains message from apply ch
+	// contains request's indexes from apply ch
 	logs map[int]chan bool
 	// keeps track of the latest sequence number it has seen for each client
-	requests []RequestInfo
+	clients map[int]RequestInfo
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	op := Op{"Get", args.Key, ""}
-	index, _, isLeader := kv.rf.Start(op)
+	index := int(nrand())
+	ch := make(chan bool, 1)
+
+	kv.mu.Lock()
+	if args.Seq <= kv.clients[args.UID].Seq {
+		reply.Err = OK
+		reply.Value = kv.clients[args.UID].Value
+		kv.mu.Unlock()
+		return
+	}
+	kv.logs[index] = ch
+	kv.mu.Unlock()
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.logs, index)
+		kv.mu.Unlock()
+	}()
+
+	op := Op{"Get", args.Key, "", args.UID, args.Seq, index}
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-
-	kv.mu.Lock()
-	kv.logs[index] = make(chan bool)
-	kv.mu.Unlock()
-
-	<-kv.logs[index]
-
-	kv.mu.Lock()
-	delete(kv.logs, index)
-	if val, ok := kv.db[args.Key]; !ok {
-		reply.Err = ErrNoKey
-	} else {
-		reply.Value = val
-		reply.Err = OK
+	// return to the client when:
+	//  op is sent to ch,
+	//  or timeout (if there are failures? ex: when the client initially contacted the leader,
+	//   but someone else has since been elected, and the client request you put in the log has been discarded)
+	select {
+	case <-ch:
+		kv.mu.Lock()
+		val, ok := kv.db[args.Key]
+		kv.mu.Unlock()
+		if !ok {
+			reply.Err = ErrNoKey
+		} else {
+			reply.Value = val
+			reply.Err = OK
+		}
+	case <-time.Tick(time.Millisecond * 100):
+		reply.Err = ErrWrongLeader
 	}
-	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	op := Op{args.Op, args.Key, args.Value}
-	index, _, isLeader := kv.rf.Start(op)
+	index := int(nrand())
+	ch := make(chan bool, 1)
 
+	kv.mu.Lock()
+	if args.Seq <= kv.clients[args.UID].Seq {
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
+	kv.logs[index] = ch
+	kv.mu.Unlock()
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.logs, index)
+		kv.mu.Unlock()
+	}()
+	op := Op{args.Op, args.Key, args.Value, args.UID, args.Seq, index}
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	kv.mu.Lock()
-	kv.logs[index] = make(chan bool)
-	kv.mu.Unlock()
-
-	<-kv.logs[index]
-	reply.Err = OK
-
-	kv.mu.Lock()
-	delete(kv.logs, index)
-	kv.mu.Unlock()
+	select {
+	case <-ch:
+		reply.Err = OK
+	case <-time.Tick(time.Millisecond * 100):
+		reply.Err = ErrWrongLeader
+	}
 }
 
 //
@@ -160,6 +191,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.db = make(map[string]string)
 	kv.logs = make(map[int]chan bool)
+	kv.clients = make(map[int]RequestInfo)
 
 	go kv.applier()
 
@@ -168,16 +200,24 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
 		if m.CommandValid {
-			kv.mu.Lock()
-			kv.logs[m.CommandIndex] <- true
-			kv.mu.Unlock()
+			op := m.Command.(Op)
 
 			kv.mu.Lock()
-			op := m.Command.(Op)
+			lastOp := kv.clients[op.ClientID]
+			if op.Seq <= lastOp.Seq {
+				kv.mu.Unlock()
+				continue
+			}
 			if op.Type == "Put" {
 				kv.db[op.Key] = op.Value
 			} else if op.Type == "Append" {
 				kv.db[op.Key] += op.Value
+			}
+			// update the seq # and value in the client's table entry
+			kv.clients[op.ClientID] = RequestInfo{op.Seq, kv.db[op.Key]}
+			// wake up the waiting RPC handler (if any)
+			if _, ok := kv.logs[op.Index]; ok {
+				kv.logs[op.Index] <- true
 			}
 			kv.mu.Unlock()
 		}
