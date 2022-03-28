@@ -692,7 +692,7 @@ func (rf *Raft) ticker() {
 			}
 			rf.mu.Unlock()
 		} else {
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond * 3)
 		}
 	}
 }
@@ -958,7 +958,7 @@ func (rf *Raft) broadcastAppendEntries(isHeartbeat bool) {
 
 				// If there exists an N such that N > commitIndex, a majority
 				// of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
-				for N := rf.getLastLogIndex(); N > rf.commitIndex; N-- {
+				for N := rf.getLastLogIndex(); N > rf.commitIndex && N >= rf.LastIncludedIndex; N-- {
 					count := 1
 					for _, index := range rf.matchIndex {
 						if index >= N {

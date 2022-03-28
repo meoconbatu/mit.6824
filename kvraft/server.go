@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,8 @@ type KVServer struct {
 	logs map[int]chan bool
 	// keeps track of the latest sequence number it has seen for each client
 	clients map[int]RequestInfo
+
+	persister *raft.Persister
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -192,14 +195,25 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.db = make(map[string]string)
 	kv.logs = make(map[int]chan bool)
 	kv.clients = make(map[int]RequestInfo)
+	kv.persister = persister
+
+	kv.readPersist(kv.persister.ReadSnapshot())
 
 	go kv.applier()
 
 	return kv
 }
+
 func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
-		if m.CommandValid {
+		if m.SnapshotValid {
+			kv.mu.Lock()
+			ok := kv.rf.CondInstallSnapshot(m.SnapshotTerm, m.SnapshotIndex, m.Snapshot)
+			kv.mu.Unlock()
+			if ok {
+				kv.readPersist(m.Snapshot)
+			}
+		} else if m.CommandValid {
 			op := m.Command.(Op)
 
 			kv.mu.Lock()
@@ -215,6 +229,11 @@ func (kv *KVServer) applier() {
 			}
 			// update the seq # and value in the client's table entry
 			kv.clients[op.ClientID] = RequestInfo{op.Seq, kv.db[op.Key]}
+
+			// save a snapshot when Raft state size is approaching maxraftstate
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				kv.persist(m.CommandIndex)
+			}
 			// wake up the waiting RPC handler (if any)
 			if _, ok := kv.logs[op.Index]; ok {
 				kv.logs[op.Index] <- true
@@ -222,4 +241,30 @@ func (kv *KVServer) applier() {
 			kv.mu.Unlock()
 		}
 	}
+}
+
+func (kv *KVServer) readPersist(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var db map[string]string
+	var clients map[int]RequestInfo
+	if d.Decode(&db) != nil || d.Decode(&clients) != nil {
+		log.Fatalf("decode error")
+	}
+	kv.mu.Lock()
+	kv.clients = clients
+	kv.db = db
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) persist(index int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.db)
+	e.Encode(kv.clients)
+	data := w.Bytes()
+	kv.rf.Snapshot(index, data)
 }
