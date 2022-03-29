@@ -891,7 +891,7 @@ func (rf *Raft) broadcastAppendEntries(isHeartbeat bool) {
 		var prevLogIndex, prevLogTerm int
 
 		if lastLogIndex >= nextIndex {
-			entries = rf.subLog(nextIndex, lastLogIndex)
+			entries = append(entries, rf.subLog(nextIndex, lastLogIndex)...)
 			prevLogIndex = nextIndex - 1
 		} else {
 			prevLogIndex = lastLogIndex
