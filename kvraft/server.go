@@ -207,10 +207,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) applier() {
 	for m := range kv.applyCh {
 		if m.SnapshotValid {
-			kv.mu.Lock()
-			ok := kv.rf.CondInstallSnapshot(m.SnapshotTerm, m.SnapshotIndex, m.Snapshot)
-			kv.mu.Unlock()
-			if ok {
+			if kv.rf.CondInstallSnapshot(m.SnapshotTerm, m.SnapshotIndex, m.Snapshot) {
 				kv.readPersist(m.Snapshot)
 			}
 		} else if m.CommandValid {
@@ -229,12 +226,13 @@ func (kv *KVServer) applier() {
 			}
 			// update the seq # and value in the client's table entry
 			kv.clients[op.ClientID] = RequestInfo{op.Seq, kv.db[op.Key]}
-
+			kv.mu.Unlock()
 			// save a snapshot when Raft state size is approaching maxraftstate
 			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
 				kv.persist(m.CommandIndex)
 			}
 			// wake up the waiting RPC handler (if any)
+			kv.mu.Lock()
 			if _, ok := kv.logs[op.Index]; ok {
 				kv.logs[op.Index] <- true
 			}
@@ -263,8 +261,12 @@ func (kv *KVServer) readPersist(data []byte) {
 func (kv *KVServer) persist(index int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
+
+	kv.mu.Lock()
 	e.Encode(kv.db)
 	e.Encode(kv.clients)
+	kv.mu.Unlock()
+
 	data := w.Bytes()
 	kv.rf.Snapshot(index, data)
 }

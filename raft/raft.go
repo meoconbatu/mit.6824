@@ -197,7 +197,6 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-
 	// Your code here (2C).
 
 	r := bytes.NewBuffer(data)
@@ -207,15 +206,13 @@ func (rf *Raft) readPersist(data []byte) {
 	var lastIncludedIndex, lastIncludedTerm int
 	if d.Decode(&log) != nil || d.Decode(&votedFor) != nil || d.Decode(&currentTerm) != nil ||
 		d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
-		logger.Error("error decode data")
-	} else {
-		rf.Log = log
-		rf.CurrentTerm = currentTerm
-		rf.VotedFor = votedFor
-		rf.LastIncludedIndex = lastIncludedIndex
-		rf.LastIncludedTerm = lastIncludedTerm
+		logger.Fatalln("error decode data")
 	}
-	logger.Trace("readPersist currentTerm ", currentTerm)
+	rf.Log = log
+	rf.CurrentTerm = currentTerm
+	rf.VotedFor = votedFor
+	rf.LastIncludedIndex = lastIncludedIndex
+	rf.LastIncludedTerm = lastIncludedTerm
 }
 
 // CondInstallSnapshot func
@@ -229,14 +226,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	defer rf.mu.Unlock()
 
 	// Your code here (2D).
-	logger.Debug("CondInstallSnapshot me, lastIndex, lastTerm, lastApplied ", rf.me, lastIncludedIndex, lastIncludedTerm, rf.lastApplied)
 
 	// refuse to install a snapshot if it is an old snapshot:
 	// Raft has processed entries after the snapshot's lastIncludedTerm/lastIncludedIndex
 	if lastIncludedIndex <= rf.lastApplied {
 		return false
 	}
-
 	if lastIncludedIndex >= rf.getLastLogIndex() {
 		rf.Log = []LogEntry{{}}
 	} else {
@@ -262,8 +257,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	logger.Debug("SNAPSHOT rf.me, index", rf.me, index)
 
 	rf.LastIncludedTerm = rf.logAt(index).Term
 	rf.Log = append([]LogEntry{rf.Log[0]}, rf.logFrom(index+1)...)
@@ -390,7 +383,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer logger.Trace("VOTE from, to, args(term, from, lastidx, lastterm), reply(term, vote?) ", args.CandidateID, rf.me, args, reply)
 
 	if args.Term < rf.CurrentTerm {
 		reply.Set(rf.CurrentTerm, false)
@@ -398,7 +390,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if args.Term > rf.CurrentTerm {
-		// logger.Trace("vote convertToFollower args.Term > rf.CurrentTerm ", args.Term, rf.CurrentTerm)
 		rf.CurrentTerm = args.Term
 		rf.convertToFollower()
 		rf.persist()
@@ -408,7 +399,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// check candidate’s log is at least as up-to-date as receiver’s log:
 		// candidate has higher term in last log entry, or
 		// candidate has same last term and same length or longer log
-		logger.Trace("len(rf.Log) + rf.LastIncludedIndex", len(rf.Log), rf.LastIncludedIndex)
 		lastLog := rf.getLastLogEntry()
 		lastLogIndex := rf.getLastLogIndex()
 		if args.LastLogTerm > lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex >= lastLogIndex) {
@@ -419,7 +409,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			if len(rf.heardFromLeaderChan) == 0 {
 				rf.heardFromLeaderChan <- true
 			}
-
 			return
 		}
 	}
@@ -430,14 +419,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer func() {
-		if len(args.Entries) > 0 {
-			logger.Debug("AppendEntries f, t, Fterm, Tterm, PrevLogIndex, PrevLogTerm,lenEntries, reply ", args.LeaderID, rf.me, args.Term, rf.CurrentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), reply)
-			logger.Debug(rf.me, rf.lastApplied, rf.commitIndex, rf.LastIncludedIndex, rf.Log)
-			// 1 2 5 5 9 1 6 &{5 false 1 9 0}
-			// 2 9 9 9 [{0 <nil>}]
-		}
-	}()
 
 	if args.Term < rf.CurrentTerm {
 		reply.Set(rf.CurrentTerm, false)
@@ -446,8 +427,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.Term > rf.CurrentTerm {
-		logger.Trace("append convertToFollower reply.Term > rf.CurrentTerm", reply.Term, rf.CurrentTerm)
-
 		rf.CurrentTerm = args.Term
 		rf.convertToFollower()
 		rf.persist()
@@ -492,12 +471,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Append any new entries not already in the log
 	rf.Log = append(rf.Log, args.Entries[index:]...)
-	rf.persist()
+	// rf.persist()
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
-
-		logger.Trace("commitIndex ", rf.commitIndex, rf.me)
 	}
 
 	// If AppendEntries RPC received from new leader: convert to follower
@@ -520,7 +497,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer logger.Debug("INSTALLSNAPSHOT f, t, Fterm, Tterm, LastIncludedIndex, LastIncludedTerm, reply ", args.LeaderID, rf.me, args.Term, rf.CurrentTerm, args.LastIncludedIndex, args.LastIncludedTerm, reply)
 
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
@@ -531,7 +507,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.convertToFollower()
 		rf.persist()
 	}
-	logger.Trace("args.LastIncludedIndex, rf.getLastLogIndex(), rf.lastApplied ", args.LastIncludedIndex, rf.getLastLogIndex(), rf.lastApplied)
 
 	msg := ApplyMsg{}
 	msg.CommandValid = false
@@ -638,8 +613,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.Log = append(rf.Log, newEntry)
 	rf.persist()
 
-	logger.Debug("start ", rf.me, newEntry, rf.getLastLogIndex(), rf.Log)
-
 	return rf.getLastLogIndex(), rf.CurrentTerm, rf.isLeader()
 }
 
@@ -731,8 +704,6 @@ func (rf *Raft) startElection() {
 		rf.persist()
 	}
 
-	logger.Trace("startElection ", rf.me)
-
 	// reset election timer
 	rf.startElectionTimer()
 
@@ -753,8 +724,6 @@ func (rf *Raft) broadcastRequestVote() chan RequestVoteReply {
 			args := RequestVoteArgs{currentTerm, rf.me, lastLogIndex, lastLog.Term}
 			reply := RequestVoteReply{}
 			if rf.sendRequestVote(target, &args, &reply) {
-				logger.Debug("sendRequestVote ", rf.me, target, args, reply)
-
 				replyCh <- reply
 			}
 		}(target, rf.CurrentTerm)
@@ -772,8 +741,6 @@ func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh
 		case reply := <-replyCh:
 			rf.mu.Lock()
 			if reply.Term > rf.CurrentTerm {
-				logger.Trace("vote reply convertToFollower reply.Term > rf.CurrentTerm", reply.Term, rf.CurrentTerm)
-
 				rf.CurrentTerm = reply.Term
 				rf.convertToFollower()
 				rf.persist()
@@ -781,10 +748,7 @@ func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh
 				rf.mu.Unlock()
 				return
 			}
-			if reply.VoteGranted {
-				atomic.AddInt32(&voteCount, 1)
-			}
-			if int(atomic.LoadInt32(&voteCount)) > rf.n/2 {
+			if reply.VoteGranted && int(atomic.AddInt32(&voteCount, 1)) > rf.n/2 {
 				rf.convertToLeader()
 
 				rf.mu.Unlock()
@@ -792,8 +756,6 @@ func (rf *Raft) processRequestVoteReply(replyCh chan RequestVoteReply, timeoutCh
 			}
 			rf.mu.Unlock()
 		case <-timeoutCh:
-			logger.Trace("timeout", rf.me)
-
 			return
 		}
 	}
@@ -804,24 +766,16 @@ func (rf *Raft) isLeader() bool {
 }
 
 func (rf *Raft) convertToFollower() {
-	if rf.state != FOLLOWER {
-		logger.Trace("FOLLOWER ", rf.me, rf.CurrentTerm)
-	}
 	rf.state = FOLLOWER
 	rf.VotedFor = -1
 	rf.startElectionTimer()
 }
 func (rf *Raft) convertToFollowerNoResetVote() {
-	if rf.state != FOLLOWER {
-		logger.Trace("FOLLOWER ", rf.me, rf.CurrentTerm)
-	}
 	rf.state = FOLLOWER
 	rf.startElectionTimer()
 }
 func (rf *Raft) convertToLeader() {
 	rf.state = LEADER
-
-	logger.Debug("LEADER (id, term, lenLog, commitIndex) ", rf.me, rf.CurrentTerm, rf.getLastLogIndex(), rf.commitIndex)
 
 	// reinitialized after election
 	if rf.nextIndex == nil {
@@ -966,8 +920,6 @@ func (rf *Raft) broadcastAppendEntries(isHeartbeat bool) {
 						}
 					}
 					if count > rf.n/2 && rf.logAt(N).Term == rf.CurrentTerm {
-						logger.Trace("commitindex= ", rf.commitIndex, N, rf.matchIndex, rf.me)
-
 						rf.commitIndex = N
 						break
 					}
@@ -1039,7 +991,6 @@ func (rf *Raft) startApplyLogLoop(applyCh chan ApplyMsg) {
 			msg.Command = rf.logAt(rf.lastApplied).Command
 			msg.CommandIndex = rf.lastApplied
 			msg.CommandValid = true
-			logger.Trace("apply rf.lastApplied, rf.me", rf.lastApplied, rf.me)
 
 			rf.mu.Unlock()
 
